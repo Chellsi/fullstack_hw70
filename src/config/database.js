@@ -1,8 +1,6 @@
-import { MongoClient } from 'mongodb';
+import mongoose from 'mongoose';
 
-let cachedClient = null;
-let cachedDb = null;
-let clientPromise = null;
+let connectionPromise = null;
 
 export class MongoConfigurationError extends Error {
   constructor(message) {
@@ -12,8 +10,8 @@ export class MongoConfigurationError extends Error {
 }
 
 export async function connectToDatabase() {
-  if (cachedDb) {
-    return { client: cachedClient, db: cachedDb };
+  if (mongoose.connection && mongoose.connection.readyState === 1) {
+    return mongoose.connection;
   }
 
   const { MONGODB_URI, MONGODB_DB_NAME } = process.env;
@@ -26,40 +24,53 @@ export async function connectToDatabase() {
     throw new MongoConfigurationError('Змінна оточення MONGODB_DB_NAME не налаштована.');
   }
 
-  if (!clientPromise) {
-    const mongoOptions = {
+  if (!connectionPromise) {
+    const mongooseOptions = {
+      dbName: MONGODB_DB_NAME,
       serverSelectionTimeoutMS:
         Number.parseInt(process.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS, 10) || 5000
     };
 
     if (process.env.MONGODB_DIRECT_CONNECTION === 'true') {
-      mongoOptions.directConnection = true;
+      mongooseOptions.directConnection = true;
     }
 
-    if (process.env.MONGODB_TLS_ALLOW_INVALID_CERTS === 'true') {
-      mongoOptions.tlsAllowInvalidCertificates = true;
+    const allowInvalidCerts = process.env.MONGODB_TLS_ALLOW_INVALID_CERTS === 'true';
+    const allowInvalidHostnames = process.env.MONGODB_TLS_ALLOW_INVALID_HOSTNAMES === 'true';
+    const tlsInsecure = process.env.MONGODB_TLS_INSECURE === 'true';
+
+    if (allowInvalidCerts) {
+      mongooseOptions.tlsAllowInvalidCertificates = true;
+    }
+
+    if (allowInvalidHostnames) {
+      mongooseOptions.tlsAllowInvalidHostnames = true;
+    }
+
+    if (tlsInsecure) {
+      mongooseOptions.tlsInsecure = true;
+    }
+
+    if (allowInvalidCerts || tlsInsecure) {
+      // Atlas інколи завершує TLS рукостискання ще до того, як драйвер врахує опції.
+      // NODE_TLS_REJECT_UNAUTHORIZED=0 гарантує, що середовище Node не зірве з'єднання.
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
     }
 
     if (process.env.MONGODB_TLS_CA_FILE) {
-      mongoOptions.tlsCAFile = process.env.MONGODB_TLS_CA_FILE;
+      mongooseOptions.tlsCAFile = process.env.MONGODB_TLS_CA_FILE;
     }
 
-    const client = new MongoClient(MONGODB_URI, mongoOptions);
-
-    clientPromise = client
-      .connect()
-      .then((connectedClient) => {
-        cachedClient = connectedClient;
-        cachedDb = connectedClient.db(MONGODB_DB_NAME);
-        return { client: cachedClient, db: cachedDb };
-      })
+    connectionPromise = mongoose
+      .connect(MONGODB_URI, mongooseOptions)
       .catch((error) => {
-        clientPromise = null;
+        connectionPromise = null;
         if (isTlsHandshakeError(error)) {
           const hint =
             'Atlas відхилив TLS-з’єднання. Додайте в .env параметр MONGODB_TLS_CA_FILE або ' +
-            'MONGODB_TLS_ALLOW_INVALID_CERTS=true, щоб використати власний сертифікат або тимчасово ' +
-            'вимкнути перевірку.';
+            'MONGODB_TLS_ALLOW_INVALID_CERTS=true/MONGODB_TLS_INSECURE=true, щоб використати власний ' +
+            'сертифікат або тимчасово вимкнути перевірку. За потреби також додайте ' +
+            'MONGODB_TLS_ALLOW_INVALID_HOSTNAMES=true.';
           throw new MongoConfigurationError(`${hint}\n${error.message}`);
         }
 
@@ -67,7 +78,8 @@ export async function connectToDatabase() {
       });
   }
 
-  return clientPromise;
+  await connectionPromise;
+  return mongoose.connection;
 }
 
 function isTlsHandshakeError(error) {
@@ -97,18 +109,17 @@ function isTlsHandshakeError(error) {
 }
 
 export function getDb() {
-  if (!cachedDb) {
+  if (!mongoose.connection || mongoose.connection.readyState !== 1) {
     throw new Error('Базу даних ще не ініціалізовано. Спочатку викличте connectToDatabase().');
   }
 
-  return cachedDb;
+  return mongoose.connection;
 }
 
 export async function closeDatabaseConnection() {
-  if (cachedClient) {
-    await cachedClient.close();
-    cachedClient = null;
-    cachedDb = null;
-    clientPromise = null;
+  if (mongoose.connection && mongoose.connection.readyState === 1) {
+    await mongoose.disconnect();
   }
+
+  connectionPromise = null;
 }
