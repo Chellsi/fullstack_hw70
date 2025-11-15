@@ -39,6 +39,14 @@ export async function connectToDatabase() {
       mongooseOptions.tlsAllowInvalidCertificates = true;
     }
 
+    if (process.env.MONGODB_TLS_ALLOW_INVALID_HOSTNAMES === 'true') {
+      mongooseOptions.tlsAllowInvalidHostnames = true;
+    }
+
+    if (process.env.MONGODB_TLS_INSECURE === 'true') {
+      mongooseOptions.tlsInsecure = true;
+    }
+
     if (process.env.MONGODB_TLS_CA_FILE) {
       mongooseOptions.tlsCAFile = process.env.MONGODB_TLS_CA_FILE;
     }
