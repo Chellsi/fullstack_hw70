@@ -35,16 +35,26 @@ export async function connectToDatabase() {
       mongooseOptions.directConnection = true;
     }
 
-    if (process.env.MONGODB_TLS_ALLOW_INVALID_CERTS === 'true') {
+    const allowInvalidCerts = process.env.MONGODB_TLS_ALLOW_INVALID_CERTS === 'true';
+    const allowInvalidHostnames = process.env.MONGODB_TLS_ALLOW_INVALID_HOSTNAMES === 'true';
+    const tlsInsecure = process.env.MONGODB_TLS_INSECURE === 'true';
+
+    if (allowInvalidCerts) {
       mongooseOptions.tlsAllowInvalidCertificates = true;
     }
 
-    if (process.env.MONGODB_TLS_ALLOW_INVALID_HOSTNAMES === 'true') {
+    if (allowInvalidHostnames) {
       mongooseOptions.tlsAllowInvalidHostnames = true;
     }
 
-    if (process.env.MONGODB_TLS_INSECURE === 'true') {
+    if (tlsInsecure) {
       mongooseOptions.tlsInsecure = true;
+    }
+
+    if (allowInvalidCerts || tlsInsecure) {
+      // Atlas інколи завершує TLS рукостискання ще до того, як драйвер врахує опції.
+      // NODE_TLS_REJECT_UNAUTHORIZED=0 гарантує, що середовище Node не зірве з'єднання.
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
     }
 
     if (process.env.MONGODB_TLS_CA_FILE) {
@@ -58,8 +68,9 @@ export async function connectToDatabase() {
         if (isTlsHandshakeError(error)) {
           const hint =
             'Atlas відхилив TLS-з’єднання. Додайте в .env параметр MONGODB_TLS_CA_FILE або ' +
-            'MONGODB_TLS_ALLOW_INVALID_CERTS=true, щоб використати власний сертифікат або тимчасово ' +
-            'вимкнути перевірку.';
+            'MONGODB_TLS_ALLOW_INVALID_CERTS=true/MONGODB_TLS_INSECURE=true, щоб використати власний ' +
+            'сертифікат або тимчасово вимкнути перевірку. За потреби також додайте ' +
+            'MONGODB_TLS_ALLOW_INVALID_HOSTNAMES=true.';
           throw new MongoConfigurationError(`${hint}\n${error.message}`);
         }
 
