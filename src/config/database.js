@@ -1,8 +1,6 @@
-import { MongoClient } from 'mongodb';
+import mongoose from 'mongoose';
 
-let cachedClient = null;
-let cachedDb = null;
-let clientPromise = null;
+let connectionPromise = null;
 
 export class MongoConfigurationError extends Error {
   constructor(message) {
@@ -12,8 +10,8 @@ export class MongoConfigurationError extends Error {
 }
 
 export async function connectToDatabase() {
-  if (cachedDb) {
-    return { client: cachedClient, db: cachedDb };
+  if (mongoose.connection && mongoose.connection.readyState === 1) {
+    return mongoose.connection;
   }
 
   const { MONGODB_URI, MONGODB_DB_NAME } = process.env;
@@ -26,35 +24,29 @@ export async function connectToDatabase() {
     throw new MongoConfigurationError('Змінна оточення MONGODB_DB_NAME не налаштована.');
   }
 
-  if (!clientPromise) {
-    const mongoOptions = {
+  if (!connectionPromise) {
+    const mongooseOptions = {
+      dbName: MONGODB_DB_NAME,
       serverSelectionTimeoutMS:
         Number.parseInt(process.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS, 10) || 5000
     };
 
     if (process.env.MONGODB_DIRECT_CONNECTION === 'true') {
-      mongoOptions.directConnection = true;
+      mongooseOptions.directConnection = true;
     }
 
     if (process.env.MONGODB_TLS_ALLOW_INVALID_CERTS === 'true') {
-      mongoOptions.tlsAllowInvalidCertificates = true;
+      mongooseOptions.tlsAllowInvalidCertificates = true;
     }
 
     if (process.env.MONGODB_TLS_CA_FILE) {
-      mongoOptions.tlsCAFile = process.env.MONGODB_TLS_CA_FILE;
+      mongooseOptions.tlsCAFile = process.env.MONGODB_TLS_CA_FILE;
     }
 
-    const client = new MongoClient(MONGODB_URI, mongoOptions);
-
-    clientPromise = client
-      .connect()
-      .then((connectedClient) => {
-        cachedClient = connectedClient;
-        cachedDb = connectedClient.db(MONGODB_DB_NAME);
-        return { client: cachedClient, db: cachedDb };
-      })
+    connectionPromise = mongoose
+      .connect(MONGODB_URI, mongooseOptions)
       .catch((error) => {
-        clientPromise = null;
+        connectionPromise = null;
         if (isTlsHandshakeError(error)) {
           const hint =
             'Atlas відхилив TLS-з’єднання. Додайте в .env параметр MONGODB_TLS_CA_FILE або ' +
@@ -67,7 +59,8 @@ export async function connectToDatabase() {
       });
   }
 
-  return clientPromise;
+  await connectionPromise;
+  return mongoose.connection;
 }
 
 function isTlsHandshakeError(error) {
@@ -97,18 +90,17 @@ function isTlsHandshakeError(error) {
 }
 
 export function getDb() {
-  if (!cachedDb) {
+  if (!mongoose.connection || mongoose.connection.readyState !== 1) {
     throw new Error('Базу даних ще не ініціалізовано. Спочатку викличте connectToDatabase().');
   }
 
-  return cachedDb;
+  return mongoose.connection;
 }
 
 export async function closeDatabaseConnection() {
-  if (cachedClient) {
-    await cachedClient.close();
-    cachedClient = null;
-    cachedDb = null;
-    clientPromise = null;
+  if (mongoose.connection && mongoose.connection.readyState === 1) {
+    await mongoose.disconnect();
   }
+
+  connectionPromise = null;
 }

@@ -1,31 +1,13 @@
 import { Router } from 'express';
 import { connectToDatabase, MongoConfigurationError } from '../config/database.js';
+import { getAtlasDocumentModel } from '../models/atlasDocument.js';
 
 const atlasRouter = Router();
 
-const resolveCollection = async () => {
-  const { client, db } = await connectToDatabase();
-  const configuredCollection = process.env.MONGODB_COLLECTION;
-
-  let targetDb = db;
-  let collectionName = configuredCollection || 'samples';
-
-  if (configuredCollection && configuredCollection.includes('.')) {
-    const [firstSegment, ...rest] = configuredCollection.split('.');
-    const derivedCollectionName = rest.join('.');
-
-    if (derivedCollectionName) {
-      targetDb = client.db(firstSegment);
-      collectionName = derivedCollectionName;
-    }
-  }
-
-  return {
-    client,
-    db: targetDb,
-    collection: targetDb.collection(collectionName),
-    collectionName: configuredCollection || collectionName
-  };
+const resolveModel = async () => {
+  await connectToDatabase();
+  const { model, collectionName } = getAtlasDocumentModel();
+  return { model, collectionName };
 };
 
 const parseJsonParam = (value, fallback) => {
@@ -54,11 +36,11 @@ atlasRouter.get('/data', async (req, res, next) => {
   };
 
   try {
-    const { collection, collectionName } = await resolveCollection();
-    const documents = await collection
-      .find({})
+    const { model, collectionName } = await resolveModel();
+    const documents = await model
+      .find({}, undefined, { lean: true })
       .limit(25)
-      .toArray();
+      .exec();
 
     viewModel.collectionName = collectionName;
     viewModel.documents = documents;
@@ -82,24 +64,17 @@ atlasRouter.get('/data', async (req, res, next) => {
 
 atlasRouter.get('/api/documents', async (req, res, next) => {
   try {
-    const { collection } = await resolveCollection();
+    const { model } = await resolveModel();
     const filter = parseJsonParam(req.query.filter, {});
     const projection = parseJsonParam(req.query.projection, undefined);
     const limit = req.query.limit ? Math.min(parseInt(req.query.limit, 10) || 0, 100) : 25;
-
-    const findOptions = {};
-
-    if (projection !== undefined) {
-      findOptions.projection = projection;
-    }
-
-    const cursor = collection.find(filter, findOptions);
+    const query = model.find(filter, projection, { lean: true });
 
     if (limit > 0) {
-      cursor.limit(limit);
+      query.limit(limit);
     }
 
-    const documents = await cursor.toArray();
+    const documents = await query.exec();
     res.json({
       count: documents.length,
       documents
@@ -118,7 +93,7 @@ atlasRouter.get('/api/documents/stream', async (req, res, next) => {
   let cursor;
 
   try {
-    const { collection } = await resolveCollection();
+    const { model } = await resolveModel();
     const filter = parseJsonParam(req.query.filter, {});
     const projection = parseJsonParam(req.query.projection, undefined);
     const limit = req.query.limit ? Math.max(Math.min(parseInt(req.query.limit, 10) || 0, 1000), 0) : 0;
@@ -126,21 +101,17 @@ atlasRouter.get('/api/documents/stream', async (req, res, next) => {
       ? Math.max(Math.min(parseInt(req.query.batchSize, 10) || 0, 500), 1)
       : undefined;
 
-    const findOptions = {};
-
-    if (projection !== undefined) {
-      findOptions.projection = projection;
-    }
+    const query = model.find(filter, projection, { lean: true });
 
     if (batchSize !== undefined) {
-      findOptions.batchSize = batchSize;
+      query.batchSize(batchSize);
     }
-
-    cursor = collection.find(filter, findOptions);
 
     if (limit > 0) {
-      cursor.limit(limit);
+      query.limit(limit);
     }
+
+    cursor = query.cursor();
 
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.write('{"documents":[');
@@ -178,7 +149,7 @@ atlasRouter.get('/api/documents/stream', async (req, res, next) => {
 
 atlasRouter.get('/api/documents/stats', async (req, res, next) => {
   try {
-    const { collection } = await resolveCollection();
+    const { model } = await resolveModel();
     const match = parseJsonParam(req.query.match, {});
     const groupBy = req.query.groupBy || null;
     const avgField = req.query.avgField || null;
@@ -224,7 +195,7 @@ atlasRouter.get('/api/documents/stats', async (req, res, next) => {
 
     pipeline.push({ $sort: { count: -1 } });
 
-    const results = await collection.aggregate(pipeline).toArray();
+    const results = await model.aggregate(pipeline);
 
     res.json({
       pipeline,
@@ -242,7 +213,7 @@ atlasRouter.get('/api/documents/stats', async (req, res, next) => {
 
 atlasRouter.post('/api/documents', async (req, res, next) => {
   try {
-    const { collection } = await resolveCollection();
+    const { model } = await resolveModel();
     const { document } = req.body;
 
     if (!document || typeof document !== 'object' || Array.isArray(document)) {
@@ -250,10 +221,10 @@ atlasRouter.post('/api/documents', async (req, res, next) => {
       return;
     }
 
-    const result = await collection.insertOne(document);
+    const createdDocument = await model.create(document);
     res.status(201).json({
-      acknowledged: result.acknowledged,
-      insertedId: result.insertedId
+      acknowledged: true,
+      insertedId: createdDocument._id
     });
   } catch (error) {
     next(error);
@@ -262,7 +233,7 @@ atlasRouter.post('/api/documents', async (req, res, next) => {
 
 atlasRouter.post('/api/documents/bulk', async (req, res, next) => {
   try {
-    const { collection } = await resolveCollection();
+    const { model } = await resolveModel();
     const { documents } = req.body;
 
     if (!Array.isArray(documents) || documents.length === 0) {
@@ -270,11 +241,15 @@ atlasRouter.post('/api/documents/bulk', async (req, res, next) => {
       return;
     }
 
-    const result = await collection.insertMany(documents);
+    const insertedDocuments = await model.insertMany(documents);
+    const insertedIds = insertedDocuments.reduce((acc, doc, index) => {
+      acc[index] = doc._id;
+      return acc;
+    }, {});
     res.status(201).json({
-      acknowledged: result.acknowledged,
-      insertedCount: result.insertedCount,
-      insertedIds: result.insertedIds
+      acknowledged: true,
+      insertedCount: insertedDocuments.length,
+      insertedIds
     });
   } catch (error) {
     next(error);
@@ -283,7 +258,7 @@ atlasRouter.post('/api/documents/bulk', async (req, res, next) => {
 
 atlasRouter.patch('/api/documents/update-one', async (req, res, next) => {
   try {
-    const { collection } = await resolveCollection();
+    const { model } = await resolveModel();
     const { filter, update, options } = req.body;
 
     if (!filter || typeof filter !== 'object' || Array.isArray(filter)) {
@@ -301,7 +276,7 @@ atlasRouter.patch('/api/documents/update-one', async (req, res, next) => {
       return;
     }
 
-    const result = await collection.updateOne(filter, update, options);
+    const result = await model.updateOne(filter, update, options);
     res.json({
       acknowledged: result.acknowledged,
       matchedCount: result.matchedCount,
@@ -315,7 +290,7 @@ atlasRouter.patch('/api/documents/update-one', async (req, res, next) => {
 
 atlasRouter.patch('/api/documents/update-many', async (req, res, next) => {
   try {
-    const { collection } = await resolveCollection();
+    const { model } = await resolveModel();
     const { filter, update, options } = req.body;
 
     if (!filter || typeof filter !== 'object' || Array.isArray(filter)) {
@@ -333,7 +308,7 @@ atlasRouter.patch('/api/documents/update-many', async (req, res, next) => {
       return;
     }
 
-    const result = await collection.updateMany(filter, update, options);
+    const result = await model.updateMany(filter, update, options);
     res.json({
       acknowledged: result.acknowledged,
       matchedCount: result.matchedCount,
@@ -347,7 +322,7 @@ atlasRouter.patch('/api/documents/update-many', async (req, res, next) => {
 
 atlasRouter.put('/api/documents/replace-one', async (req, res, next) => {
   try {
-    const { collection } = await resolveCollection();
+    const { model } = await resolveModel();
     const { filter, replacement, options } = req.body;
 
     if (!filter || typeof filter !== 'object' || Array.isArray(filter)) {
@@ -367,7 +342,7 @@ atlasRouter.put('/api/documents/replace-one', async (req, res, next) => {
       return;
     }
 
-    const result = await collection.replaceOne(filter, replacement, options);
+    const result = await model.replaceOne(filter, replacement, options);
     res.json({
       acknowledged: result.acknowledged,
       matchedCount: result.matchedCount,
@@ -381,7 +356,7 @@ atlasRouter.put('/api/documents/replace-one', async (req, res, next) => {
 
 atlasRouter.delete('/api/documents/delete-one', async (req, res, next) => {
   try {
-    const { collection } = await resolveCollection();
+    const { model } = await resolveModel();
     const { filter, options } = req.body;
 
     if (!filter || typeof filter !== 'object' || Array.isArray(filter)) {
@@ -394,7 +369,7 @@ atlasRouter.delete('/api/documents/delete-one', async (req, res, next) => {
       return;
     }
 
-    const result = await collection.deleteOne(filter, options);
+    const result = await model.deleteOne(filter, options);
     res.json({
       acknowledged: result.acknowledged,
       deletedCount: result.deletedCount
@@ -406,7 +381,7 @@ atlasRouter.delete('/api/documents/delete-one', async (req, res, next) => {
 
 atlasRouter.delete('/api/documents/delete-many', async (req, res, next) => {
   try {
-    const { collection } = await resolveCollection();
+    const { model } = await resolveModel();
     const { filter, options } = req.body;
 
     if (!filter || typeof filter !== 'object' || Array.isArray(filter)) {
@@ -419,7 +394,7 @@ atlasRouter.delete('/api/documents/delete-many', async (req, res, next) => {
       return;
     }
 
-    const result = await collection.deleteMany(filter, options);
+    const result = await model.deleteMany(filter, options);
     res.json({
       acknowledged: result.acknowledged,
       deletedCount: result.deletedCount

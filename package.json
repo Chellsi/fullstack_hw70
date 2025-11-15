@@ -25,7 +25,8 @@
     "passport": "file:vendor/passport",
     "passport-local": "file:vendor/passport-local",
     "pug": "^3.0.2",
-    "mongodb": "^6.10.0"
+    "mongodb": "^6.10.0",
+    "mongoose": "file:vendor/mongoose"
   },
   "devDependencies": {
     "nodemon": "^3.0.1",
